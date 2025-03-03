@@ -1,3 +1,9 @@
+# Libero
+LIBERO/
+
+# Stable-baselines3
+stable-baselines3/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
