@@ -233,6 +233,7 @@ class CNNProjector(BaseFeaturesExtractor):
 class WandBLoggingCallback(BaseCallback):
     """
     WandB에 학습 과정을 로깅하기 위한 콜백
+    멀티프로세싱 환경(SubprocVecEnv)에서도 올바르게 작동하도록 설계됨
     """
 
     def __init__(self, verbose=0):
@@ -240,94 +241,121 @@ class WandBLoggingCallback(BaseCallback):
         self.episode_rewards = []
         self.episode_lengths = []
         self.episode_success = []
-        self.current_episode_reward = 0
-        self.current_episode_length = 0
+        # 각 환경별 현재 에피소드 정보 추적
+        self.current_episode_rewards = None
+        self.current_episode_lengths = None
         self.step_actions = []
         self.step_rewards = []
         # 성공 횟수 추적을 위한 변수 추가
         self.total_success_count = 0
+        # 실제 환경 수 저장 변수
+        self.n_envs = 0
+        # 총 처리된 환경 스텝 수 (num_timesteps는 모델 스텝 수)
+        self.total_env_steps = 0
+
+    def _init_callback(self):
+        # 부모 클래스 초기화
+        super()._init_callback()
+        # 환경 수 확인
+        self.n_envs = self.model.get_env().num_envs
+        print(f"[WandB 로깅] {self.n_envs}개 환경에 대한 로깅 설정")
+        # 각 환경별 현재 에피소드 정보 초기화
+        self.current_episode_rewards = np.zeros(self.n_envs)
+        self.current_episode_lengths = np.zeros(self.n_envs)
 
     def _on_step(self) -> bool:
-        # 현재 스텝의 정보 수집
-        info = self.locals.get("infos")[0] if self.locals.get("infos") else {}
-        reward = self.locals.get("rewards")[0] if self.locals.get("rewards") is not None else 0
-        action = self.locals.get("actions")[0] if self.locals.get("actions") is not None else None
+        # 현재 스텝의 정보 수집 (모든 환경)
+        infos = self.locals.get("infos", [{}] * self.n_envs)
+        rewards = self.locals.get("rewards", np.zeros(self.n_envs))
+        actions = self.locals.get("actions")
+        dones = self.locals.get("dones", np.zeros(self.n_envs, dtype=bool))
 
-        # 현재 에피소드 정보 업데이트
-        self.current_episode_reward += reward
-        self.current_episode_length += 1
+        # 총 환경 스텝 수 업데이트 (모든 병렬 환경의 스텝 합산)
+        self.total_env_steps += self.n_envs
 
-        # 액션과 보상 기록
-        if action is not None:
-            self.step_actions.append(action)
-            self.step_rewards.append(reward)
+        # 각 환경별 에피소드 정보 업데이트
+        for i in range(self.n_envs):
+            self.current_episode_rewards[i] += rewards[i]
+            self.current_episode_lengths[i] += 1
+
+        # 액션과 보상 기록 (평균값 사용)
+        if actions is not None:
+            self.step_actions.append(np.mean(actions, axis=0) if self.n_envs > 1 else actions[0])
+            self.step_rewards.append(np.mean(rewards))
 
             # 액션 통계 로깅 (10 스텝마다)
             if len(self.step_actions) >= 10:
-                actions = np.array(self.step_actions)
+                actions_array = np.array(self.step_actions)
                 wandb.log(
                     {
-                        "actions/mean_dx": np.mean(actions[:, 0]),
-                        "actions/mean_dy": np.mean(actions[:, 1]),
-                        "actions/mean_dz": np.mean(actions[:, 2]),
-                        "actions/mean_dRx": np.mean(actions[:, 3]),
-                        "actions/mean_dRy": np.mean(actions[:, 4]),
-                        "actions/mean_dRz": np.mean(actions[:, 5]),
-                        "actions/mean_gripper": np.mean(actions[:, 6]),
+                        "actions/mean_dx": np.mean(actions_array[:, 0]),
+                        "actions/mean_dy": np.mean(actions_array[:, 1]),
+                        "actions/mean_dz": np.mean(actions_array[:, 2]),
+                        "actions/mean_dRx": np.mean(actions_array[:, 3]),
+                        "actions/mean_dRy": np.mean(actions_array[:, 4]),
+                        "actions/mean_dRz": np.mean(actions_array[:, 5]),
+                        "actions/mean_gripper": np.mean(actions_array[:, 6]),
                         "rewards/step_mean": np.mean(self.step_rewards),
                         "rewards/step_std": np.std(self.step_rewards),
+                        "env/active_envs": self.n_envs,
                     },
                     step=self.num_timesteps,
                 )
                 self.step_actions = []
                 self.step_rewards = []
 
-        # 에피소드 종료 시 처리
-        done = self.locals.get("dones")[0] if self.locals.get("dones") is not None else False
-        if done:
-            # 에피소드 정보 저장
-            self.episode_rewards.append(self.current_episode_reward)
-            self.episode_lengths.append(self.current_episode_length)
-            success = info.get("is_success", False)
-            self.episode_success.append(float(success))
+        # 각 환경별 에피소드 종료 처리
+        for i in range(self.n_envs):
+            if dones[i]:
+                # 에피소드 정보 저장
+                self.episode_rewards.append(self.current_episode_rewards[i])
+                self.episode_lengths.append(self.current_episode_lengths[i])
 
-            # 성공 횟수 업데이트
-            if success:
-                self.total_success_count += 1
+                # 성공 여부 확인
+                info = infos[i] if i < len(infos) else {}
+                success = info.get("is_success", False)
+                self.episode_success.append(float(success))
 
-            # WandB에 에피소드 정보 로깅
-            wandb.log(
-                {
-                    "episode/reward": self.current_episode_reward,
-                    "episode/length": self.current_episode_length,
-                    "episode/success": float(success),
-                    "episode/success_rate": np.mean(self.episode_success[-100:]) if self.episode_success else 0,
-                    "episode/total_success_count": self.total_success_count,  # 누적 성공 횟수 추가
-                },
-                step=self.num_timesteps,
-            )
+                # 성공 횟수 업데이트
+                if success:
+                    self.total_success_count += 1
 
-            # 에피소드 정보 초기화
-            self.current_episode_reward = 0
-            self.current_episode_length = 0
-
-            # 100 에피소드마다 추가 통계 로깅
-            if len(self.episode_rewards) % 10 == 0:
+                # WandB에 개별 에피소드 정보 로깅
                 wandb.log(
                     {
-                        "train/mean_reward_100": np.mean(self.episode_rewards[-100:]),
-                        "train/mean_length_100": np.mean(self.episode_lengths[-100:]),
-                        "train/success_rate_100": np.mean(self.episode_success[-100:]),
-                        "train/total_episodes": len(self.episode_rewards),
-                        "train/total_success_count": self.total_success_count,  # 누적 성공 횟수 추가
+                        "episode/reward": self.current_episode_rewards[i],
+                        "episode/length": self.current_episode_lengths[i],
+                        "episode/success": float(success),
+                        "episode/success_rate": np.mean(self.episode_success[-100:]) if self.episode_success else 0,
+                        "episode/total_success_count": self.total_success_count,
+                        "episode/env_id": i,
+                        "episode/total_env_steps": self.total_env_steps,
                     },
                     step=self.num_timesteps,
                 )
 
-                # 모델 학습 상태 로깅
-                if hasattr(self.model, "logger") and hasattr(self.model.logger, "name_to_value"):
-                    for key, value in self.model.logger.name_to_value.items():
-                        wandb.log({f"sb3/{key}": value}, step=self.num_timesteps)
+                # 해당 환경의 에피소드 정보 초기화
+                self.current_episode_rewards[i] = 0
+                self.current_episode_lengths[i] = 0
+
+                # 10 에피소드마다 추가 통계 로깅
+                if len(self.episode_rewards) % 10 == 0:
+                    wandb.log(
+                        {
+                            "train/mean_reward_100": np.mean(self.episode_rewards[-100:]),
+                            "train/mean_length_100": np.mean(self.episode_lengths[-100:]),
+                            "train/success_rate_100": np.mean(self.episode_success[-100:]),
+                            "train/total_episodes": len(self.episode_rewards),
+                            "train/total_success_count": self.total_success_count,
+                            "train/total_env_steps": self.total_env_steps,
+                        },
+                        step=self.num_timesteps,
+                    )
+
+                    # 모델 학습 상태 로깅
+                    if hasattr(self.model, "logger") and hasattr(self.model.logger, "name_to_value"):
+                        for key, value in self.model.logger.name_to_value.items():
+                            wandb.log({f"sb3/{key}": value}, step=self.num_timesteps)
 
         # 학습 진행 상황 로깅 (1000 스텝마다)
         if self.num_timesteps % 1000 == 0:
@@ -338,6 +366,7 @@ class WandBLoggingCallback(BaseCallback):
                     {
                         "buffer/size": buffer_size,
                         "buffer/capacity_used": buffer_size / self.model.replay_buffer.buffer_size,
+                        "buffer/steps_per_env": self.total_env_steps / self.n_envs,
                     },
                     step=self.num_timesteps,
                 )
@@ -540,6 +569,7 @@ def main():
                     "features_dim": 256,
                     "cnn_layers": 3,
                 },
+                "expected_env_steps": cfg.total_timesteps * cfg.num_envs,  # 예상 총 환경 스텝 수
             }
         )
 
@@ -549,6 +579,7 @@ def main():
                 "env/num_envs": cfg.num_envs,
                 "env/observation_space": str(env.observation_space),
                 "env/action_space": str(env.action_space),
+                "env/timestep_multiplier": cfg.num_envs,  # 모델 스텝당 환경 스텝 배수
             }
         )
 
@@ -583,6 +614,14 @@ def main():
             wandb.run.summary["total_success_count"] = wandb_callback.total_success_count
             wandb.run.summary["mean_episode_length"] = np.mean(wandb_callback.episode_lengths[-100:])
             wandb.run.summary["mean_episode_reward"] = np.mean(wandb_callback.episode_rewards[-100:])
+            # 환경 스텝 관련 정보 추가
+            wandb.run.summary["total_env_steps"] = wandb_callback.total_env_steps
+            wandb.run.summary["env_steps_per_model_step"] = wandb_callback.total_env_steps / cfg.total_timesteps
+            wandb.run.summary["success_per_1000_env_steps"] = (
+                (wandb_callback.total_success_count * 1000) / wandb_callback.total_env_steps
+                if wandb_callback.total_env_steps > 0
+                else 0
+            )
 
     print("===== LIBERO SAC 학습 종료 =====")
 
