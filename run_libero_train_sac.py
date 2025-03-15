@@ -229,6 +229,8 @@ class WandBLoggingCallback(BaseCallback):
         self.current_episode_length = 0
         self.step_actions = []
         self.step_rewards = []
+        # 성공 횟수 추적을 위한 변수 추가
+        self.total_success_count = 0
 
     def _on_step(self) -> bool:
         # 현재 스텝의 정보 수집
@@ -274,6 +276,10 @@ class WandBLoggingCallback(BaseCallback):
             success = info.get("is_success", False)
             self.episode_success.append(float(success))
 
+            # 성공 횟수 업데이트
+            if success:
+                self.total_success_count += 1
+
             # WandB에 에피소드 정보 로깅
             wandb.log(
                 {
@@ -281,6 +287,7 @@ class WandBLoggingCallback(BaseCallback):
                     "episode/length": self.current_episode_length,
                     "episode/success": float(success),
                     "episode/success_rate": np.mean(self.episode_success[-100:]) if self.episode_success else 0,
+                    "episode/total_success_count": self.total_success_count,  # 누적 성공 횟수 추가
                 },
                 step=self.num_timesteps,
             )
@@ -297,6 +304,7 @@ class WandBLoggingCallback(BaseCallback):
                         "train/mean_length_100": np.mean(self.episode_lengths[-100:]),
                         "train/success_rate_100": np.mean(self.episode_success[-100:]),
                         "train/total_episodes": len(self.episode_rewards),
+                        "train/total_success_count": self.total_success_count,  # 누적 성공 횟수 추가
                     },
                     step=self.num_timesteps,
                 )
@@ -505,6 +513,7 @@ def main():
             final_success_rate = np.mean(wandb_callback.episode_success[-100:])
             wandb.run.summary["final_success_rate"] = final_success_rate
             wandb.run.summary["total_episodes"] = len(wandb_callback.episode_rewards)
+            wandb.run.summary["total_success_count"] = wandb_callback.total_success_count
             wandb.run.summary["mean_episode_length"] = np.mean(wandb_callback.episode_lengths[-100:])
             wandb.run.summary["mean_episode_reward"] = np.mean(wandb_callback.episode_rewards[-100:])
 
