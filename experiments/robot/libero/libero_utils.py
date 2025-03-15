@@ -47,13 +47,19 @@ def resize_image(img, resize_size):
     return img
 
 
-def get_libero_image(obs, resize_size):
+def get_libero_image(obs, resize_size, is_openvla=False):
     """Extracts image from observations and preprocesses it."""
     assert isinstance(resize_size, int) or isinstance(resize_size, tuple)
     if isinstance(resize_size, int):
         resize_size = (resize_size, resize_size)
-    img = obs["agentview_image"]
-    img = img[::-1, ::-1]  # IMPORTANT: rotate 180 degrees to match train preprocessing
+    if "agentview_image" in obs:
+        img = obs["agentview_image"]
+    elif "full_image" in obs:
+        img = obs["full_image"]
+    else:
+        raise ValueError(f"No image found in observations: {obs.keys()}")
+    if is_openvla:
+        img = img[::-1, ::-1]  # IMPORTANT: rotate 180 degrees to match train preprocessing
     img = resize_image(img, resize_size)
     return img
 

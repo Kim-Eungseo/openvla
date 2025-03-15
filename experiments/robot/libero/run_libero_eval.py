@@ -78,9 +78,9 @@ class GenerateConfig:
     run_id_note: Optional[str] = None                # Extra note to add in run ID for logging
     local_log_dir: str = "./experiments/logs"        # Local directory for eval logs
 
-    use_wandb: bool = False                          # Whether to also log results in Weights & Biases
-    wandb_project: str = "YOUR_WANDB_PROJECT"        # Name of W&B project to log to (use default!)
-    wandb_entity: str = "YOUR_WANDB_ENTITY"          # Name of entity to log under
+    use_wandb: bool = True                          # Whether to also log results in Weights & Biases
+    wandb_project: str = "corl-2025"               # Name of W&B project to log to (use default!)
+    wandb_entity: str = "vla-test-01"              # Name of entity to log under
 
     seed: int = 7                                    # Random Seed (for reproducibility)
 
